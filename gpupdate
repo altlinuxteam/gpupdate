@@ -8,27 +8,40 @@ import threading
 import os
 import errno
 
+import tempfile
+import shutil
+
+gpoa = '/root/gpoa'
+
 class gpupdate:
+    _tmp_root = '/tmp/gpupdate'
+
     def __init__(self, user, domain, controller, cache_dir):
-        self.gpos = []
-        self.user = user
-        self.domain = domain
-        self.controller = controller
-        self.cache_dir = cache_dir
+        self._gpos = []
+        self._user = user
+        self._domain = domain
+        self._controller = controller
+        self._cache_dir = cache_dir
+        try:
+            os.makedirs(self._tmp_root)
+        except OSError as exc:
+            if exc.errno != errno.EEXIST:
+                raise
+            pass
+        self._temp_dir = self._mktmp('/tmp/gpupdate')
 
     def update(self):
         '''
         Update GPO cache.
         '''
-        proc = subprocess.Popen(['net', 'ads', 'gpo', 'list', self.user], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(['net', 'ads', 'gpo', 'list', self._user], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         #output = subprocess.check_output(['net', 'ads', 'gpo', 'list', self.user])
         #print(output)
         thr = threading.Thread(target=self._parse_netads, args=(proc,))
         thr.start()
         thr.join()
 
-        self._make_cache()
-        self._fetch_gpos()
+        return self._fetch_gpos()
 
     def _parse_netads(self, proc):
         '''
@@ -37,37 +50,103 @@ class gpupdate:
         for line in iter(proc.stdout.readline, b''):
             decoded_line = line.decode('utf-8')
             if decoded_line.startswith('filesyspath') and line != b'filesyspath:\t\t(null)\n':
-                self.gpos.append(self._strip_paths(decoded_line))
+                self._gpos.append(self._strip_paths(decoded_line))
 
 
     def _fetch_gpos(self):
         '''
         Download GPO directories specified by their GUIDs using smbclient with Kerberos 5 authentication.
         '''
-        for pol in self.gpos:
-            smbclient_cmd = 'prompt OFF;recurse ON;cd {}/Policies/{};lcd {}/{}/{};mget *'.format(self.domain, pol, self.cache_dir, self.user, pol)
+        retrieved_gpos = []
+        for pol in self._gpos:
+            policy_tmp_dir = '{}/{}'.format(self._temp_dir, pol)
+            os.makedirs(policy_tmp_dir)
+            smbclient_cmd = 'prompt OFF;recurse ON;cd {}/Policies/{};lcd {};mget *'.format(self._domain, pol, policy_tmp_dir)
             print('Executing: {}'.format(smbclient_cmd))
-            subprocess.call('smbclient -k \'\\\\{}\\sysvol\' -N -c \'{}\''.format(self.controller, smbclient_cmd), shell=True)
+            retcode = subprocess.call('smbclient -k \'\\\\{}\\sysvol\' -N -c \'{}\''.format(self._controller, smbclient_cmd), shell=True)
+            if retcode == 0:
+                print('Successfully retrieved GPO: {}'.format(pol))
+                self._2gpo_cache(policy_tmp_dir, pol)
+                retrieved_gpos.append(pol)
+            else:
+                print('Unable to retrieve GPO: {}'.format(pol))
+        return retrieved_gpos
 
-    def _make_cache(self):
+    def _mktmp(self, tmp):
         '''
-        Create user Group Policy Container cache directories
+        Create temporary directory to download GPO
         '''
         try:
-            for gpo in self.gpos:
-                print('{}/{}/{}'.format(self.cache_dir, self.user, gpo))
-                os.makedirs('{}/{}/{}'.format(self.cache_dir, self.user, gpo))
+            os.makedirs(tmp)
         except OSError as exc:
-            if exc.errno == errno.EEXIST and os.path.isdir(self.cache_dir):
-                pass
-            else:
+            if exc.errno != errno.EEXIST:
                 raise
+            pass
+        return tempfile.mkdtemp(dir=tmp)
 
     def _strip_paths(self, policy_path):
         '''
         Strip newlines and extra symbols from paths.
         '''
-        return policy_path[len('filesyspath:\t\t\\\\{}\\SysVol\\{}\\Policies\\'.format(self.domain, self.domain)):].strip()
+        return policy_path[len('filesyspath:\t\t\\\\{}\\SysVol\\{}\\Policies\\'.format(self._domain, self._domain)):].strip()
+
+    def _2gpo_cache(self, obj, pol):
+        '''
+        Move downloaded GPOs to /var/cache/samba/gpo_cache
+        '''
+        gpo_dest = '{}/{}/POLICIES/{}'.format(self._cache_dir, self._domain.upper(), pol)
+        shutil.rmtree(gpo_dest) # Remove destination GPO if exists
+        shutil.move(obj, gpo_dest)
+
+class hreg:
+    _hreg_exe = '/root/hreg'
+    _hreg_cache = '/var/cache/samba/gpupdate'
+
+    def __init__(self, cache_dir, domain, gpos):
+        self._cache_dir = cache_dir
+        self._domain = domain
+        self._gpos = gpos
+        try:
+            os.makedirs(self._hreg_cache)
+        except OSError as exc:
+            if exc.errno != errno.EEXIST:
+                raise
+            pass
+        self._temp_dir = self._mktmp(self._hreg_cache)
+
+    def to_fs(self):
+        '''
+        Transform policy files to file system representation for given domain
+        '''
+        policy_file = ''
+        for gpo in self._gpos:
+            source = '{}/{}/POLICIES/{}'.format(self._cache_dir, self._domain.upper(), gpo)
+            dest = '{}/{}'.format(self._temp_dir, gpo)
+            shutil.copytree(source, dest)
+            hreg_cmd = '{} apply {} {}'.format(self._hreg_exe, dest, policy_file)
+            subprocess.call(hreg_cmd, shell=True)
+
+    def _mktmp(self, tmp):
+        '''
+        Create temporary directory for GPO VFS
+        '''
+        try:
+            os.makedirs(tmp)
+        except OSError as exc:
+            if exc.errno != errno.EEXIST:
+                raise
+            pass
+        return tempfile.mkdtemp(dir=tmp)
+
+class gpoa:
+    def __init__(self):
+        pass
+
+def machine_kinit():
+    '''
+    Perform kinit with machine credentials
+    '''
+    pass
 
 def parse_cli_arguments():
     '''
@@ -85,8 +164,14 @@ def parse_cli_arguments():
 def main():
     args = parse_cli_arguments()
 
+    machine_kinit()
     updater = gpupdate(args.user, args.domain, args.controller, args.cache)
-    updater.update()
+    retrieved_gpos = updater.update()
+
+    hreg_util = hreg(args.cache, args.domain, retrieved_gpos)
+    hreg_util.to_fs()
+
+    gpo_applier = gpoa()
 
 if __name__ == '__main__':
     main()
