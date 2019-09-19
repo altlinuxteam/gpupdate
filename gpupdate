@@ -1,0 +1,93 @@
+#! /usr/bin/env python3
+
+import argparse
+
+import subprocess
+import threading
+
+import os
+import errno
+
+class gpupdate:
+    def __init__(self, user, domain, controller, cache_dir):
+        self.gpos = []
+        self.user = user
+        self.domain = domain
+        self.controller = controller
+        self.cache_dir = cache_dir
+
+    def update(self):
+        '''
+        Update GPO cache.
+        '''
+        proc = subprocess.Popen(['net', 'ads', 'gpo', 'list', self.user], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        #output = subprocess.check_output(['net', 'ads', 'gpo', 'list', self.user])
+        #print(output)
+        thr = threading.Thread(target=self._parse_netads, args=(proc,))
+        thr.start()
+        thr.join()
+
+        self._make_cache()
+        self._fetch_gpos()
+
+    def _parse_netads(self, proc):
+        '''
+        Parse output of `net ads gpo list Administrator` command.
+        '''
+        for line in iter(proc.stdout.readline, b''):
+            decoded_line = line.decode('utf-8')
+            if decoded_line.startswith('filesyspath') and line != b'filesyspath:\t\t(null)\n':
+                self.gpos.append(self._strip_paths(decoded_line))
+
+
+    def _fetch_gpos(self):
+        '''
+        Download GPO directories specified by their GUIDs using smbclient with Kerberos 5 authentication.
+        '''
+        for pol in self.gpos:
+            smbclient_cmd = 'prompt OFF;recurse ON;cd {}/Policies/{};lcd {}/{}/{};mget *'.format(self.domain, pol, self.cache_dir, self.user, pol)
+            print('Executing: {}'.format(smbclient_cmd))
+            subprocess.call('smbclient -k \'\\\\{}\\sysvol\' -N -c \'{}\''.format(self.controller, smbclient_cmd), shell=True)
+
+    def _make_cache(self):
+        '''
+        Create user Group Policy Container cache directories
+        '''
+        try:
+            for gpo in self.gpos:
+                print('{}/{}/{}'.format(self.cache_dir, self.user, gpo))
+                os.makedirs('{}/{}/{}'.format(self.cache_dir, self.user, gpo))
+        except OSError as exc:
+            if exc.errno == errno.EEXIST and os.path.isdir(self.cache_dir):
+                pass
+            else:
+                raise
+
+    def _strip_paths(self, policy_path):
+        '''
+        Strip newlines and extra symbols from paths.
+        '''
+        return policy_path[len('filesyspath:\t\t\\\\{}\\SysVol\\{}\\Policies\\'.format(self.domain, self.domain)):].strip()
+
+def parse_cli_arguments():
+    '''
+    Command line argument parser
+    '''
+    argparser = argparse.ArgumentParser(description='Update group policies for the specified user')
+    argparser.add_argument('-u', '--user', default='Administrator', help='Name of the user for GPO update')
+    argparser.add_argument('-d', '--domain', default='domain.alt', help='Name of the AD domain for replication')
+    argparser.add_argument('-c', '--controller', default='dc0', help='AD controller to connect to')
+    argparser.add_argument('-w', '--password', help='Kerberos 5 password for the specified user')
+    argparser.add_argument('-r', '--cache', default='/var/cache/samba/gpo_cache', help='GPO cache directory')
+
+    return argparser.parse_args()
+
+def main():
+    args = parse_cli_arguments()
+
+    updater = gpupdate(args.user, args.domain, args.controller, args.cache)
+    updater.update()
+
+if __name__ == '__main__':
+    main()
+
