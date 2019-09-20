@@ -59,7 +59,7 @@ class gpupdate:
         '''
         retrieved_gpos = []
         for pol in self._gpos:
-            policy_tmp_dir = '{}/{}'.format(self._temp_dir, pol)
+            policy_tmp_dir = os.path.join(self._temp_dir, pol)
             os.makedirs(policy_tmp_dir)
             smbclient_cmd = 'prompt OFF;recurse ON;cd {}/Policies/{};lcd {};mget *'.format(self._domain, pol, policy_tmp_dir)
             print('Executing: {}'.format(smbclient_cmd))
@@ -100,31 +100,47 @@ class gpupdate:
 
 class hreg:
     _hreg_exe = '/root/hreg'
-    _hreg_cache = '/var/cache/samba/gpupdate'
+    _hreg_cache = '/var/cache/gpupdate'
 
-    def __init__(self, cache_dir, domain, gpos):
+    def __init__(self, cache_dir, domain, gpos, sid):
         self._cache_dir = cache_dir
         self._domain = domain
         self._gpos = gpos
+        self._sid = sid
+        self._temp_dir = os.path.join(self._hreg_cache, 'tmp')
         try:
-            os.makedirs(self._hreg_cache)
+            os.makedirs(self._temp_dir)
         except OSError as exc:
             if exc.errno != errno.EEXIST:
                 raise
             pass
-        self._temp_dir = self._mktmp(self._hreg_cache)
 
     def to_fs(self):
         '''
         Transform policy files to file system representation for given domain
         '''
-        policy_file = ''
+        dest = self._mktmp(self._temp_dir)
         for gpo in self._gpos:
-            source = '{}/{}/POLICIES/{}'.format(self._cache_dir, self._domain.upper(), gpo)
-            dest = '{}/{}'.format(self._temp_dir, gpo)
-            shutil.copytree(source, dest)
-            hreg_cmd = '{} apply {} {}'.format(self._hreg_exe, dest, policy_file)
+            policy_file = '{}/{}/POLICIES/{}/User/Registry.pol'.format(self._cache_dir, self._domain.upper(), gpo)
+            hreg_cmd = '{} apply {} {} -u {}'.format(self._hreg_exe, dest, policy_file, self._sid)
             subprocess.call(hreg_cmd, shell=True)
+        # Move data to permanent cache
+        permanent_cache = '{}/{}'.format(self._hreg_cache, self._sid)
+        try:
+            shutil.rmtree(permanent_cache)
+        except OSError as exc:
+            if exc.errno != errno.ENOENT:
+                raise
+            pass
+        try:
+            os.makedirs(permanent_cache)
+        except OSError as exc:
+            if exc.errno != errno.EEXIST:
+                raise
+            pass
+        for i in os.listdir(dest):
+            shutil.move(os.path.join(dest, i), permanent_cache)
+        shutil.rmtree(dest)
 
     def _mktmp(self, tmp):
         '''
@@ -142,6 +158,14 @@ class gpoa:
     def __init__(self):
         pass
 
+def wbinfo_getsid(domain, user):
+    '''
+    Get SID using wbinfo
+    '''
+    output = subprocess.check_output(['wbinfo', '-n', '{}\\{}'.format(domain.upper(), user)])
+    sid = output.split()[0].decode('utf-8')
+    return sid
+
 def machine_kinit():
     '''
     Perform kinit with machine credentials
@@ -157,7 +181,7 @@ def parse_cli_arguments():
     argparser.add_argument('-d', '--domain', default='domain.alt', help='Name of the AD domain for replication')
     argparser.add_argument('-c', '--controller', default='dc0', help='AD controller to connect to')
     argparser.add_argument('-w', '--password', help='Kerberos 5 password for the specified user')
-    argparser.add_argument('-r', '--cache', default='/var/cache/samba/gpo_cache', help='GPO cache directory')
+    argparser.add_argument('-r', '--cache', default='/var/cache/samba/gpo_cache', help='Samba GPO cache directory')
 
     return argparser.parse_args()
 
@@ -168,7 +192,9 @@ def main():
     updater = gpupdate(args.user, args.domain, args.controller, args.cache)
     retrieved_gpos = updater.update()
 
-    hreg_util = hreg(args.cache, args.domain, retrieved_gpos)
+    sid = wbinfo_getsid(args.domain, args.user)
+    print(sid)
+    hreg_util = hreg(args.cache, args.domain, retrieved_gpos, sid)
     hreg_util.to_fs()
 
     gpo_applier = gpoa()
