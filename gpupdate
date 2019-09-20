@@ -14,14 +14,14 @@ import shutil
 gpoa = '/root/gpoa'
 
 class gpupdate:
+    _smb_cache = '/var/cache/samba/gpo_cache'
     _tmp_root = '/tmp/gpupdate'
 
-    def __init__(self, user, domain, controller, cache_dir):
+    def __init__(self, user, domain, controller):
         self._gpos = []
         self._user = user
         self._domain = domain
         self._controller = controller
-        self._cache_dir = cache_dir
         try:
             os.makedirs(self._tmp_root)
         except OSError as exc:
@@ -94,7 +94,7 @@ class gpupdate:
         '''
         Move downloaded GPOs to /var/cache/samba/gpo_cache
         '''
-        gpo_dest = '{}/{}/POLICIES/{}'.format(self._cache_dir, self._domain.upper(), pol)
+        gpo_dest = os.path.join(self._smb_cache, self._domain.upper(), 'POLICIES', pol)
         shutil.rmtree(gpo_dest) # Remove destination GPO if exists
         shutil.move(obj, gpo_dest)
 
@@ -121,11 +121,16 @@ class hreg:
         '''
         dest = self._mktmp(self._temp_dir)
         for gpo in self._gpos:
-            policy_file = '{}/{}/POLICIES/{}/User/Registry.pol'.format(self._cache_dir, self._domain.upper(), gpo)
+            policy_file = os.path.join(self._cache_dir,
+                self._domain.upper(),
+                'POLICIES',
+                gpo,
+                'User',
+                'Registry.pol')
             hreg_cmd = '{} apply {} {} -u {}'.format(self._hreg_exe, dest, policy_file, self._sid)
             subprocess.call(hreg_cmd, shell=True)
         # Move data to permanent cache
-        permanent_cache = '{}/{}'.format(self._hreg_cache, self._sid)
+        permanent_cache = os.path.join(self._hreg_cache, self._sid)
         try:
             shutil.rmtree(permanent_cache)
         except OSError as exc:
@@ -155,14 +160,21 @@ class hreg:
         return tempfile.mkdtemp(dir=tmp)
 
 class gpoa:
-    def __init__(self):
-        pass
+    _gpoa_exe = '/root/gpoa/gpoA/main.py'
+
+    def __init__(self, sid):
+        self._sid = sid
+
+    def generate_scripts(self):
+        gpoa_cmd = [self._gpoa_exe]
+        output = subprocess.call(gpoa_cmd)
 
 def wbinfo_getsid(domain, user):
     '''
     Get SID using wbinfo
     '''
-    output = subprocess.check_output(['wbinfo', '-n', '{}\\{}'.format(domain.upper(), user)])
+    wbinfo_cmd = ['wbinfo', '-n', '{}\\{}'.format(domain.upper(), user)]
+    output = subprocess.check_output(wbinfo_cmd)
     sid = output.split()[0].decode('utf-8')
     return sid
 
@@ -177,11 +189,44 @@ def parse_cli_arguments():
     Command line argument parser
     '''
     argparser = argparse.ArgumentParser(description='Update group policies for the specified user')
-    argparser.add_argument('-u', '--user', default='Administrator', help='Name of the user for GPO update')
-    argparser.add_argument('-d', '--domain', default='domain.alt', help='Name of the AD domain for replication')
-    argparser.add_argument('-c', '--controller', default='dc0', help='AD controller to connect to')
-    argparser.add_argument('-w', '--password', help='Kerberos 5 password for the specified user')
-    argparser.add_argument('-r', '--cache', default='/var/cache/samba/gpo_cache', help='Samba GPO cache directory')
+    argparser.add_argument('-u',
+        '--user',
+        default='Administrator',
+        help='Name of the user for GPO update')
+    argparser.add_argument('-d',
+        '--domain',
+        default='domain.alt',
+        help='Name of the AD domain for replication')
+    argparser.add_argument('-c',
+        '--controller',
+        default='dc0',
+        help='AD controller to connect to')
+    argparser.add_argument('-p',
+        '--password',
+        help='Kerberos 5 password for the specified user')
+    argparser.add_argument('-i',
+        '--sid',
+        help='Specify SID for User target')
+    argparser.add_argument('-t',
+        '--target',
+        default='User',
+        help='Computer or User')
+    argparser.add_argument('-f',
+        '--force',
+        help='Reapply all policy settings')
+    argparser.add_argument('-w',
+        '--wait',
+        default=600,
+        help='Wait for specified number of seconds')
+    argparser.add_argument('-l',
+        '--logoff',
+        help='Force logoff after settings are applied')
+    argparser.add_argument('-b',
+        '--boot',
+        help='Force reboot after settings are applied')
+    argparser.add_argument('-s',
+        '--sync',
+        help='Perform next GPO application synchronously')
 
     return argparser.parse_args()
 
@@ -189,15 +234,15 @@ def main():
     args = parse_cli_arguments()
 
     machine_kinit()
-    updater = gpupdate(args.user, args.domain, args.controller, args.cache)
+    updater = gpupdate(args.user, args.domain, args.controller)
     retrieved_gpos = updater.update()
 
     sid = wbinfo_getsid(args.domain, args.user)
-    print(sid)
-    hreg_util = hreg(args.cache, args.domain, retrieved_gpos, sid)
+    hreg_util = hreg('/var/cache/samba/gpo_cache', args.domain, retrieved_gpos, sid)
     hreg_util.to_fs()
 
-    gpo_applier = gpoa()
+    gpo_applier = gpoa(sid)
+    gpo_applier.generate_scripts()
 
 if __name__ == '__main__':
     main()
