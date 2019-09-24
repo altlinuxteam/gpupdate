@@ -11,7 +11,9 @@ import errno
 import tempfile
 import shutil
 
-gpoa = '/root/gpoa'
+import socket
+import sys
+import re
 
 class gpupdate:
     _smb_cache = '/var/cache/samba/gpo_cache'
@@ -61,7 +63,7 @@ class gpupdate:
         for pol in self._gpos:
             policy_tmp_dir = os.path.join(self._temp_dir, pol)
             os.makedirs(policy_tmp_dir)
-            smbclient_cmd = 'prompt OFF;recurse ON;cd {}/Policies/{};lcd {};mget *'.format(self._domain, pol, policy_tmp_dir)
+            smbclient_cmd = 'prompt OFF;recurse ON;cd {}/Policies/{};lcd {};mget *'.format(self._domain.lower(), pol, policy_tmp_dir)
             print('Executing: {}'.format(smbclient_cmd))
             retcode = subprocess.call('smbclient -k \'\\\\{}\\sysvol\' -N -c \'{}\''.format(self._controller, smbclient_cmd), shell=True)
             if retcode == 0:
@@ -99,7 +101,7 @@ class gpupdate:
         shutil.move(obj, gpo_dest)
 
 class hreg:
-    _hreg_exe = '/root/hreg'
+    _hreg_exe = '/usr/bin/hreg'
     _hreg_cache = '/var/cache/gpupdate'
 
     def __init__(self, cache_dir, domain, gpos, sid):
@@ -160,14 +162,23 @@ class hreg:
         return tempfile.mkdtemp(dir=tmp)
 
 class gpoa:
-    _gpoa_exe = '/root/gpoa/gpoA/main.py'
+    _gpoa_dir = '/usr/lib/gpoa'
+    _gpoa_exe = 'main.py'
 
     def __init__(self, sid):
         self._sid = sid
 
     def generate_scripts(self):
-        gpoa_cmd = [self._gpoa_exe]
+        '''
+        Call gpoa utility to generate scripts
+        '''
+        gpoa_cmd = ['./{}'.format(self._gpoa_exe), self._sid]
+        cwd = os.getcwd()
+
+        os.chdir(self._gpoa_dir)
         output = subprocess.call(gpoa_cmd)
+        print(output)
+        os.chdir(cwd)
 
 def wbinfo_getsid(domain, user):
     '''
@@ -182,7 +193,47 @@ def machine_kinit():
     '''
     Perform kinit with machine credentials
     '''
-    pass
+    host = socket.gethostname().split('.', 1)[0].upper() + "$"
+    subprocess.call(['kinit', '-k', host])
+    print('kinit succeed')
+
+def check_krb_ticket():
+    '''
+    Check if Kerberos 5 ticket present
+    '''
+    try:
+        subprocess.check_call([ 'klist', '-s' ])
+        output = subprocess.check_output('klist', stderr=subprocess.STDOUT).decode()
+        print(output)
+    except:
+        sys.exit( 1 )
+    print('Ticket check succeed')
+
+def get_domain_name():
+    '''
+    Get current Active Directory domain name
+    '''
+    lookup_cmd = ['net', 'ads', 'lookup']
+    output = subprocess.check_output(lookup_cmd, stderr=subprocess.STDOUT).decode()
+    d = re.search( "Domain:\s*(\S+)\n", output, re.MULTILINE )
+    if d:
+        domain_name = d.group(1)
+        print(domain_name)
+        return domain_name
+    return
+
+def get_domain_controller():
+    '''
+    Get current Active Directory domain name
+    '''
+    lookup_cmd = ['net', 'ads', 'lookup']
+    output = subprocess.check_output(lookup_cmd, stderr=subprocess.STDOUT).decode()
+    d = re.search( "^Domain Controller:\s*(\S+)\n", output, re.MULTILINE )
+    if d:
+        domain_controller = d.group(1)
+        print(domain_controller)
+        return domain_controller
+    return
 
 def parse_cli_arguments():
     '''
@@ -195,11 +246,9 @@ def parse_cli_arguments():
         help='Name of the user for GPO update')
     argparser.add_argument('-d',
         '--domain',
-        default='domain.alt',
         help='Name of the AD domain for replication')
     argparser.add_argument('-c',
         '--controller',
-        default='dc0',
         help='AD controller to connect to')
     argparser.add_argument('-p',
         '--password',
@@ -234,11 +283,18 @@ def main():
     args = parse_cli_arguments()
 
     machine_kinit()
-    updater = gpupdate(args.user, args.domain, args.controller)
+    check_krb_ticket()
+
+    domain = get_domain_name()
+    print('Domain: {}'.format(domain))
+    controller = get_domain_controller()
+    print('Controller: {}'.format(controller))
+
+    updater = gpupdate(args.user, domain, controller)
     retrieved_gpos = updater.update()
 
-    sid = wbinfo_getsid(args.domain, args.user)
-    hreg_util = hreg('/var/cache/samba/gpo_cache', args.domain, retrieved_gpos, sid)
+    sid = wbinfo_getsid(domain, args.user)
+    hreg_util = hreg('/var/cache/samba/gpo_cache', domain, retrieved_gpos, sid)
     hreg_util.to_fs()
 
     gpo_applier = gpoa(sid)
