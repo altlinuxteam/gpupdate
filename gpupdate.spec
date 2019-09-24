@@ -2,7 +2,7 @@
 
 Name:     gpupdate
 Version:  0.1
-Release:  alt1
+Release:  alt2
 
 Summary:  GPO applier
 License:  GPLv2+
@@ -39,6 +39,9 @@ cp -av gpoa/* %buildroot/%_libexecdir/gpoa
 %_libexecdir/gpoa
 
 %changelog
+* Tue Sep 24 2019 Igor Chudov <nir@altlinux.org> 0.1-alt2
+- gpoa sources added
+
 * Mon Sep 23 2019 Igor Chudov <nir@altlinux.org> 0.1-alt1
 - Initial release
 
