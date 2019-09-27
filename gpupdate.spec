@@ -19,7 +19,6 @@ Requires: samba-common-tools
 Requires: samba-client
 Requires: samba-winbind
 Requires: hreg
-Requires: %name-templates
 
 BuildArch: noarch
 
