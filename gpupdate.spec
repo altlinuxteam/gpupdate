@@ -31,12 +31,12 @@ GPO applier
 
 %install
 install -Dm 0755 gpupdate %buildroot%_bindir/gpupdate
-mkdir -p %buildroot/%_libexecdir/gpoa
-cp -av gpoa/* %buildroot/%_libexecdir/gpoa
+mkdir -p %buildroot/%python3_sitelibdir_noarch/gpoa
+cp -av gpoa/* %buildroot/%python3_sitelibdir_noarch/gpoa
 
 %files
 %_bindir/%name
-%_libexecdir/gpoa
+%python3_sitelibdir_noarch/gpoa
 
 %changelog
 * Tue Sep 24 2019 Igor Chudov <nir@altlinux.org> 0.1-alt2
